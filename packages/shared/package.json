@@ -21,6 +21,10 @@
     "./protocol": {
       "types": "./dist/protocol/index.d.ts",
       "import": "./dist/protocol/index.js"
+    },
+    "./validation": {
+      "types": "./dist/validation/index.d.ts",
+      "import": "./dist/validation/index.js"
     }
   },
   "scripts": {
@@ -31,5 +35,8 @@
   },
   "devDependencies": {
     "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "zod": "^4.3.5"
   }
 }

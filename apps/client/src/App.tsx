@@ -1,5 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Application, Graphics, Text, TextStyle } from "pixi.js";
+import {
+  PLAYER_SPEED,
+  PLAYER_SIZE,
+  PLAYER_HALF_SIZE,
+  WS_RECONNECT_DELAY_MS,
+  COLORS,
+  TITLE_FONT_SIZE,
+  SUBTITLE_FONT_SIZE,
+} from "./constants/game";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected";
 
@@ -7,6 +16,7 @@ export function App() {
   const canvasRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("disconnected");
   const [serverMessage, setServerMessage] = useState<string>("");
 
@@ -14,12 +24,19 @@ export function App() {
   useEffect(() => {
     if (!canvasRef.current || appRef.current) return;
 
+    const keys = new Set<string>();
+    let player: Graphics;
+
+    const handleKeyDown = (e: KeyboardEvent) => keys.add(e.key.toLowerCase());
+    const handleKeyUp = (e: KeyboardEvent) => keys.delete(e.key.toLowerCase());
+    let handleResize: () => void;
+
     const initPixi = async () => {
       const app = new Application();
       await app.init({
         width: window.innerWidth,
         height: window.innerHeight,
-        backgroundColor: 0x1a1a2e,
+        backgroundColor: COLORS.background,
         resolution: window.devicePixelRatio || 1,
         autoDensity: true,
       });
@@ -28,27 +45,27 @@ export function App() {
       appRef.current = app;
 
       // Draw a test sprite (placeholder player)
-      const player = new Graphics();
-      player.fill(0xe94560);
-      player.rect(-16, -16, 32, 32);
+      player = new Graphics();
+      player.fill(COLORS.player);
+      player.rect(-PLAYER_HALF_SIZE, -PLAYER_HALF_SIZE, PLAYER_SIZE, PLAYER_SIZE);
       player.fill();
       player.x = app.screen.width / 2;
       player.y = app.screen.height / 2;
       app.stage.addChild(player);
 
       // Add title text
-      const style = new TextStyle({
+      const titleStyle = new TextStyle({
         fontFamily: "Arial",
-        fontSize: 48,
+        fontSize: TITLE_FONT_SIZE,
         fontWeight: "bold",
-        fill: "#ffffff",
+        fill: COLORS.textPrimary,
         dropShadow: {
           color: "#000000",
           blur: 4,
           distance: 2,
         },
       });
-      const title = new Text({ text: "PERONIO MMORPG", style });
+      const title = new Text({ text: "PERONIO MMORPG", style: titleStyle });
       title.anchor.set(0.5);
       title.x = app.screen.width / 2;
       title.y = 100;
@@ -57,35 +74,41 @@ export function App() {
       // Add subtitle
       const subtitleStyle = new TextStyle({
         fontFamily: "Arial",
-        fontSize: 18,
-        fill: "#a0a0a0",
+        fontSize: SUBTITLE_FONT_SIZE,
+        fill: COLORS.textSecondary,
       });
-      const subtitle = new Text({ text: "Press WASD to move (coming soon)", style: subtitleStyle });
+      const subtitle = new Text({
+        text: "Press WASD to move (coming soon)",
+        style: subtitleStyle,
+      });
       subtitle.anchor.set(0.5);
       subtitle.x = app.screen.width / 2;
       subtitle.y = 150;
       app.stage.addChild(subtitle);
 
-      // Simple keyboard controls for the placeholder
-      const keys = new Set<string>();
-      const speed = 5;
-
-      window.addEventListener("keydown", (e) => keys.add(e.key.toLowerCase()));
-      window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+      // Keyboard controls
+      window.addEventListener("keydown", handleKeyDown);
+      window.addEventListener("keyup", handleKeyUp);
 
       app.ticker.add(() => {
-        if (keys.has("w") || keys.has("arrowup")) player.y -= speed;
-        if (keys.has("s") || keys.has("arrowdown")) player.y += speed;
-        if (keys.has("a") || keys.has("arrowleft")) player.x -= speed;
-        if (keys.has("d") || keys.has("arrowright")) player.x += speed;
+        if (keys.has("w") || keys.has("arrowup")) player.y -= PLAYER_SPEED;
+        if (keys.has("s") || keys.has("arrowdown")) player.y += PLAYER_SPEED;
+        if (keys.has("a") || keys.has("arrowleft")) player.x -= PLAYER_SPEED;
+        if (keys.has("d") || keys.has("arrowright")) player.x += PLAYER_SPEED;
 
         // Keep player in bounds
-        player.x = Math.max(16, Math.min(app.screen.width - 16, player.x));
-        player.y = Math.max(16, Math.min(app.screen.height - 16, player.y));
+        player.x = Math.max(
+          PLAYER_HALF_SIZE,
+          Math.min(app.screen.width - PLAYER_HALF_SIZE, player.x)
+        );
+        player.y = Math.max(
+          PLAYER_HALF_SIZE,
+          Math.min(app.screen.height - PLAYER_HALF_SIZE, player.y)
+        );
       });
 
       // Handle resize
-      const handleResize = () => {
+      handleResize = () => {
         app.renderer.resize(window.innerWidth, window.innerHeight);
         title.x = app.screen.width / 2;
         subtitle.x = app.screen.width / 2;
@@ -95,7 +118,14 @@ export function App() {
 
     initPixi();
 
+    // Cleanup
     return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      if (handleResize) {
+        window.removeEventListener("resize", handleResize);
+      }
+
       if (appRef.current) {
         appRef.current.destroy(true);
         appRef.current = null;
@@ -103,56 +133,71 @@ export function App() {
     };
   }, []);
 
-  // WebSocket connection
-  useEffect(() => {
-    const connectWebSocket = () => {
-      setConnectionStatus("connecting");
+  // WebSocket connection with proper cleanup
+  const connectWebSocket = useCallback(() => {
+    // Clear any existing reconnect timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
 
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
+    setConnectionStatus("connecting");
 
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
 
-      ws.onopen = () => {
-        console.log("[WS] Connected");
-        setConnectionStatus("connected");
-      };
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
 
-      ws.onmessage = (event) => {
-        try {
-          const message = JSON.parse(event.data);
-          console.log("[WS] Message:", message);
-
-          if (message.type === "system:message") {
-            setServerMessage(message.content);
-          }
-        } catch (error) {
-          console.error("[WS] Parse error:", error);
-        }
-      };
-
-      ws.onclose = () => {
-        console.log("[WS] Disconnected");
-        setConnectionStatus("disconnected");
-
-        // Reconnect after 3 seconds
-        setTimeout(connectWebSocket, 3000);
-      };
-
-      ws.onerror = (error) => {
-        console.error("[WS] Error:", error);
-      };
+    ws.onopen = () => {
+      console.info("[WS] Connected");
+      setConnectionStatus("connected");
     };
 
-    connectWebSocket();
+    ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        console.info("[WS] Message:", message);
 
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
+        if (message.type === "system:message") {
+          setServerMessage(message.content);
+        }
+      } catch (error) {
+        console.error("[WS] Parse error:", error);
       }
     };
+
+    ws.onclose = () => {
+      console.info("[WS] Disconnected");
+      setConnectionStatus("disconnected");
+
+      // Schedule reconnect
+      reconnectTimeoutRef.current = setTimeout(connectWebSocket, WS_RECONNECT_DELAY_MS);
+    };
+
+    ws.onerror = (error) => {
+      console.error("[WS] Error:", error);
+    };
   }, []);
+
+  useEffect(() => {
+    connectWebSocket();
+
+    // Cleanup
+    return () => {
+      // Clear reconnect timeout
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+
+      // Close WebSocket
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [connectWebSocket]);
 
   return (
     <div className="game-container">
@@ -175,7 +220,7 @@ export function App() {
               background: "rgba(0, 0, 0, 0.7)",
               padding: "10px 20px",
               borderRadius: 8,
-              color: "#4ade80",
+              color: COLORS.success,
               fontSize: 14,
             }}
           >

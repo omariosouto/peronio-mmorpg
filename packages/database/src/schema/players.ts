@@ -3,6 +3,7 @@ import { relations } from "drizzle-orm";
 import { characterClassEnum } from "./enums";
 import { maps } from "./maps";
 import { items } from "./items";
+import type { EquipmentSlots } from "@peronio/shared";
 
 export { characterClassEnum };
 
@@ -37,7 +38,7 @@ export const players = pgTable("players", {
   isBanned: boolean("is_banned").default(false).notNull(),
 
   // Equipment
-  equipment: jsonb("equipment").$type<Record<string, string>>().default({}),
+  equipment: jsonb("equipment").$type<EquipmentSlots>().default({}),
 
   // Gold
   gold: integer("gold").default(0).notNull(),
